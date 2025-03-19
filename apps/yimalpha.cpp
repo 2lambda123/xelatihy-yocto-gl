@@ -56,29 +56,28 @@ void run(const vector<string>& args) {
   parse_cli(cli, args);
 
   // load
-  auto image = load_image(imagename);
-  auto alpha = load_image(alphaname);
+  auto source = load_image(imagename);
+  auto alpha  = load_image(alphaname);
 
-  // check sizes
-  if (image.width != alpha.width || image.height != alpha.height)
-    throw io_error("different image sizes");
-
-  // check types
-  if (image.linear != alpha.linear) throw io_error("different image types");
+  // check sizes and types
+  if (source.size() != alpha.size()) throw io_error("different image sizes");
+  if (is_linear_filename(imagename) != is_linear_filename(alphaname) ||
+      is_linear_filename(imagename) != is_linear_filename(outname))
+    throw io_error("different image types");
 
   // edit alpha
-  auto out = make_image(image.width, image.height, image.linear);
-  for (auto idx : range(image.pixels.size())) {
-    auto calpha = alpha.pixels[idx];
+  auto out = image<vec4f>{source.size()};
+  for (auto idx : range(source.size())) {
+    auto calpha = alpha[idx];
     auto alpha_ = from_color   ? mean(xyz(calpha))
                   : from_black ? (mean(xyz(calpha)) > 0.01 ? 1.0f : 0.0f)
                                : calpha.w;
     if (to_color) {
-      out.pixels[idx] = {alpha_, alpha_, alpha_, alpha_};
+      out[idx] = {alpha_, alpha_, alpha_, alpha_};
     } else {
-      auto color      = image.pixels[idx];
-      color.w         = alpha_;
-      out.pixels[idx] = color;
+      auto color = source[idx];
+      color.w    = alpha_;
+      out[idx]   = color;
     }
   }
 

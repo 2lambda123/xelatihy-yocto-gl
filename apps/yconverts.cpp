@@ -80,7 +80,7 @@ void run(const vector<string>& args) {
   // switch between facevarying and not
   if (!facevarying) {
     // load mesh
-    auto shape = load_shape(shapename, true);
+    auto shape = load_shape(shapename);
 
     // remove data
     if (aspositions) {
@@ -133,8 +133,8 @@ void run(const vector<string>& args) {
       }
 
       // convert to edges
-      auto edges = !shape.triangles.empty() ? get_edges(shape.triangles)
-                                            : get_edges(shape.quads);
+      auto edges = !shape.triangles.empty() ? triangles_edges(shape.triangles)
+                                            : quads_edges(shape.quads);
       shape      = lines_to_cylinders(edges, shape.positions, 4, 0.001f);
     }
 
@@ -169,10 +169,10 @@ void run(const vector<string>& args) {
     }
 
     // save mesh
-    save_shape(outname, shape, true);
+    save_shape(outname, shape);
   } else {
     // load mesh
-    auto shape = load_fvshape(shapename, true);
+    auto shape = load_fvshape(shapename);
 
     // remove data
     if (aspositions) {
@@ -230,7 +230,7 @@ void run(const vector<string>& args) {
     }
 
     // save mesh
-    save_fvshape(outname, shape, true);
+    save_fvshape(outname, shape);
   }
 }
 

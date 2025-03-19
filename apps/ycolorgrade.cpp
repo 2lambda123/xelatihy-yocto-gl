@@ -42,40 +42,27 @@ void run(const vector<string>& args) {
   // parameters
   auto imagename   = "image.png"s;
   auto outname     = "out.png"s;
-  auto paramsname  = ""s;
   auto interactive = true;
-  auto dumpname    = ""s;
   auto params      = colorgrade_params{};
 
   // parse command line
   auto cli = make_cli("ycolorgrade", "adjust image colors");
   add_option(cli, "image", imagename, "Input image.");
   add_option(cli, "output", outname, "Output image.");
-  add_option(cli, "params", paramsname, "params filename");
   add_option(cli, "interactive", interactive, "Run interactively.");
-  add_option(cli, "dumpparams", dumpname, "dump params filename");
   parse_cli(cli, args);
 
-  // load config
-  if (!paramsname.empty()) {
-    update_colorgrade_params(paramsname, params);
-  }
-
-  // dump config
-  if (!dumpname.empty()) {
-    save_colorgrade_params(dumpname, params);
-  }
-
   // load image
-  auto image = load_image(imagename);
+  auto source    = load_image(imagename);
+  auto in_linear = is_linear_filename(imagename);
 
   // switch between interactive and offline
   if (!interactive) {
     // apply color grade
-    image = colorgrade_image(image, params);
+    auto graded = colorgrade_image(source, in_linear, params);
 
     // save image
-    save_image(outname, image);
+    save_image(outname, graded);
   } else {
 #ifdef YOCTO_OPENGL
 
@@ -83,8 +70,8 @@ void run(const vector<string>& args) {
     auto params = colorgrade_params{};
 
     // display image
-    auto display = make_image(image.width, image.height, false);
-    colorgrade_image_mt(display, image, params);
+    auto display = source;
+    colorgrade_image(display, source, in_linear, params);
 
     // opengl image
     auto glimage  = glimage_state{};
@@ -98,7 +85,7 @@ void run(const vector<string>& args) {
     };
     callbacks.clear = [&](const gui_input& input) { clear_image(glimage); };
     callbacks.draw  = [&](const gui_input& input) {
-      update_image_params(input, image, glparams);
+      update_image_params(input, source, glparams);
       draw_image(glimage, glparams);
     };
     callbacks.widgets = [&](const gui_input& input) {
@@ -123,11 +110,11 @@ void run(const vector<string>& args) {
             "highlights color", params.highlights_color);
         end_gui_header();
         if (edited) {
-          colorgrade_image_mt(display, image, params);
+          colorgrade_image(display, source, true, params);
           set_image(glimage, display);
         }
       }
-      draw_image_widgets(input, image, display, glparams);
+      draw_image_widgets(input, source, display, glparams);
     };
     callbacks.uiupdate = [&glparams](const gui_input& input) {
       uiupdate_image_params(input, glparams);

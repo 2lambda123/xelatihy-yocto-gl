@@ -41,7 +41,7 @@
 #include "yocto_color.h"
 #include "yocto_geometry.h"
 #include "yocto_image.h"
-#include "yocto_noise.h"
+#include "yocto_modeling.h"
 #include "yocto_shading.h"
 #include "yocto_shape.h"
 
@@ -61,10 +61,16 @@ using namespace std::string_literals;
 // -----------------------------------------------------------------------------
 namespace yocto {
 
+// Image resolution from camera
+vec2i camera_resolution(const camera_data& camera, int resolution) {
+  return (camera.aspect >= 1)
+             ? vec2i{resolution, (int)round(resolution / camera.aspect)}
+             : vec2i{(int)round(resolution * camera.aspect), resolution};
+}
+
 // Generates a ray from a camera for yimg::image plane coordinate uv and
 // the lens coordinates luv.
-ray3f eval_camera(
-    const camera_data& camera, const vec2f& image_uv, const vec2f& lens_uv) {
+ray3f eval_camera(const camera_data& camera, vec2f image_uv, vec2f lens_uv) {
   auto film = camera.aspect >= 1
                   ? vec2f{camera.film, camera.film / camera.aspect}
                   : vec2f{camera.film * camera.aspect, camera.film};
@@ -109,82 +115,56 @@ namespace yocto {
 
 // pixel access
 vec4f lookup_texture(
-    const texture_data& texture, int i, int j, bool as_linear) {
-  auto color = vec4f{0, 0, 0, 0};
-  if (!texture.pixelsf.empty()) {
-    color = texture.pixelsf[j * texture.width + i];
-  } else {
-    color = byte_to_float(texture.pixelsb[j * texture.width + i]);
-  }
-  if (as_linear && !texture.linear) {
-    return srgb_to_rgb(color);
-  } else {
-    return color;
-  }
+    const texture_data& texture, vec2i ij, bool ldr_as_linear) {
+  if (!texture.pixelsf.empty()) return texture.pixelsf[ij];
+  if (!texture.pixelsb.empty())
+    return ldr_as_linear ? byte_to_float(texture.pixelsb[ij])
+                         : srgb_to_rgb(byte_to_float(texture.pixelsb[ij]));
+  return vec4f{0, 0, 0, 0};
 }
 
 // Evaluates an image at a point `uv`.
-vec4f eval_texture(const texture_data& texture, const vec2f& uv, bool as_linear,
-    bool no_interpolation, bool clamp_to_edge) {
-  if (texture.width == 0 || texture.height == 0) return {0, 0, 0, 0};
+vec4f eval_texture(const texture_data& texture, vec2f uv, bool ldr_as_linear) {
+  if (texture.pixelsf.empty() && texture.pixelsb.empty()) return {0, 0, 0, 0};
 
   // get texture width/height
-  auto size = vec2i{texture.width, texture.height};
+  auto size = max(texture.pixelsf.size(), texture.pixelsb.size());
 
   // get coordinates normalized for tiling
-  auto s = 0.0f, t = 0.0f;
-  if (clamp_to_edge) {
-    s = clamp(uv.x, 0.0f, 1.0f) * size.x;
-    t = clamp(uv.y, 0.0f, 1.0f) * size.y;
-  } else {
-    s = fmod(uv.x, 1.0f) * size.x;
-    if (s < 0) s += size.x;
-    t = fmod(uv.y, 1.0f) * size.y;
-    if (t < 0) t += size.y;
-  }
-
-  // get image coordinates and residuals
-  auto i = clamp((int)s, 0, size.x - 1), j = clamp((int)t, 0, size.y - 1);
-  auto ii = (i + 1) % size.x, jj = (j + 1) % size.y;
-  auto u = s - i, v = t - j;
+  auto st = (texture.clamp ? clamp(uv, 0.0f, 1.0f) : mod(uv, 1.0f)) *
+            (vec2f)size;
 
   // handle interpolation
-  if (no_interpolation) {
-    return lookup_texture(texture, i, j, as_linear);
+  if (texture.nearest) {
+    auto ij = clamp((vec2i)st, {0, 0}, size - 1);
+    return lookup_texture(texture, ij, ldr_as_linear);
   } else {
-    return lookup_texture(texture, i, j, as_linear) * (1 - u) * (1 - v) +
-           lookup_texture(texture, i, jj, as_linear) * (1 - u) * v +
-           lookup_texture(texture, ii, j, as_linear) * u * (1 - v) +
-           lookup_texture(texture, ii, jj, as_linear) * u * v;
+    auto ij   = clamp((vec2i)st, zero2i, size - 1);
+    auto i1j  = (ij + vec2i{1, 0}) % size;
+    auto ij1  = (ij + vec2i{0, 1}) % size;
+    auto i1j1 = (ij + vec2i{1, 1}) % size;
+    auto w    = st - (vec2f)ij;
+    return lookup_texture(texture, ij, ldr_as_linear) * (1 - w.x) * (1 - w.y) +
+           lookup_texture(texture, ij1, ldr_as_linear) * (1 - w.x) * w.y +
+           lookup_texture(texture, i1j, ldr_as_linear) * w.x * (1 - w.y) +
+           lookup_texture(texture, i1j1, ldr_as_linear) * w.x * w.y;
   }
-}
-vec4f eval_texture(
-    const texture_data& texture, const vec2f& uv, bool as_linear) {
-  return eval_texture(texture, uv, as_linear, texture.nearest, texture.clamp);
 }
 
 // Helpers
 vec4f eval_texture(
-    const scene_data& scene, int texture, const vec2f& uv, bool ldr_as_linear) {
+    const scene_data& scene, int texture, vec2f uv, bool ldr_as_linear) {
   if (texture == invalidid) return {1, 1, 1, 1};
-  return eval_texture(scene.textures[texture], uv, ldr_as_linear,
-      scene.textures[texture].nearest, scene.textures[texture].clamp);
-}
-vec4f eval_texture(const scene_data& scene, int texture, const vec2f& uv,
-    bool ldr_as_linear, bool no_interpolation, bool clamp_to_edge) {
-  if (texture == invalidid) return {1, 1, 1, 1};
-  return eval_texture(scene.textures[texture], uv, ldr_as_linear,
-      no_interpolation, clamp_to_edge);
+  return eval_texture(scene.textures[texture], uv, ldr_as_linear);
 }
 
 // conversion from image
-texture_data image_to_texture(const image_data& image) {
-  auto texture = texture_data{image.width, image.height, image.linear, {}, {}};
-  if (image.linear) {
-    texture.pixelsf = image.pixels;
+texture_data image_to_texture(const image<vec4f>& image, bool linear) {
+  auto texture = texture_data{};
+  if (linear) {
+    texture.pixelsf = image;
   } else {
-    texture.pixelsb.resize(image.pixels.size());
-    float_to_byte(texture.pixelsb, image.pixels);
+    texture.pixelsb = float_to_byte(image);
   }
   return texture;
 }
@@ -201,21 +181,18 @@ static const auto min_roughness = 0.03f * 0.03f;
 
 // Evaluate material
 material_point eval_material(const scene_data& scene,
-    const material_data& material, const vec2f& texcoord,
-    const vec4f& color_shp) {
+    const material_data& material, vec2f texcoord, vec4f color_shp) {
   // evaluate textures
-  auto emission_tex = eval_texture(
-      scene, material.emission_tex, texcoord, true);
-  auto color_tex     = eval_texture(scene, material.color_tex, texcoord, true);
+  auto emission_tex  = eval_texture(scene, material.emission_tex, texcoord);
+  auto color_tex     = eval_texture(scene, material.color_tex, texcoord);
   auto roughness_tex = eval_texture(
-      scene, material.roughness_tex, texcoord, false);
-  auto scattering_tex = eval_texture(
-      scene, material.scattering_tex, texcoord, true);
+      scene, material.roughness_tex, texcoord, true);
+  auto scattering_tex = eval_texture(scene, material.scattering_tex, texcoord);
 
   // material point
   auto point         = material_point{};
   point.type         = material.type;
-  point.emission     = material.emission * xyz(emission_tex) * xyz(color_shp);
+  point.emission     = material.emission * xyz(emission_tex);
   point.color        = material.color * xyz(color_tex) * xyz(color_shp);
   point.opacity      = material.opacity * color_tex.w * color_shp.w;
   point.metallic     = material.metallic * roughness_tex.z;
@@ -286,7 +263,7 @@ namespace yocto {
 
 // Eval position
 vec3f eval_position(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv) {
+    int element, vec2f uv) {
   auto& shape = scene.shapes[instance.shape];
   if (!shape.triangles.empty()) {
     auto t = shape.triangles[element];
@@ -337,7 +314,7 @@ vec3f eval_element_normal(
 
 // Eval normal
 vec3f eval_normal(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv) {
+    int element, vec2f uv) {
   auto& shape = scene.shapes[instance.shape];
   if (shape.normals.empty())
     return eval_element_normal(scene, instance, element);
@@ -366,7 +343,7 @@ vec3f eval_normal(const scene_data& scene, const instance_data& instance,
 
 // Eval texcoord
 vec2f eval_texcoord(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv) {
+    int element, vec2f uv) {
   auto& shape = scene.shapes[instance.shape];
   if (shape.texcoords.empty()) return uv;
   if (!shape.triangles.empty()) {
@@ -390,7 +367,7 @@ vec2f eval_texcoord(const scene_data& scene, const instance_data& instance,
 #if 0
 // Shape element normal.
 static pair<vec3f, vec3f> eval_tangents(
-    const trace_shape& shape, int element, const vec2f& uv) {
+    const trace_shape& shape, int element, vec2f uv) {
   if (!shape.triangles.empty()) {
     auto t = shape.triangles[element];
     if (shape.texcoords.empty()) {
@@ -444,7 +421,7 @@ pair<vec3f, vec3f> eval_element_tangents(
 }
 
 vec3f eval_normalmap(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv) {
+    int element, vec2f uv) {
   auto& shape    = scene.shapes[instance.shape];
   auto& material = scene.materials[instance.material];
   // apply normal mapping
@@ -453,7 +430,7 @@ vec3f eval_normalmap(const scene_data& scene, const instance_data& instance,
   if (material.normal_tex != invalidid &&
       (!shape.triangles.empty() || !shape.quads.empty())) {
     auto& normal_tex = scene.textures[material.normal_tex];
-    auto  normalmap  = -1 + 2 * xyz(eval_texture(normal_tex, texcoord, false));
+    auto  normalmap  = -1 + 2 * xyz(eval_texture(normal_tex, texcoord, true));
     auto [tu, tv]    = eval_element_tangents(scene, instance, element);
     auto frame       = frame3f{tu, tv, normal, {0, 0, 0}};
     frame.x          = orthonormalize(frame.x, frame.z);
@@ -467,8 +444,7 @@ vec3f eval_normalmap(const scene_data& scene, const instance_data& instance,
 
 // Eval shading position
 vec3f eval_shading_position(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv,
-    const vec3f& outgoing) {
+    const instance_data& instance, int element, vec2f uv, vec3f outgoing) {
   auto& shape = scene.shapes[instance.shape];
   if (!shape.triangles.empty() || !shape.quads.empty()) {
     return eval_position(scene, instance, element, uv);
@@ -483,8 +459,7 @@ vec3f eval_shading_position(const scene_data& scene,
 
 // Eval shading normal
 vec3f eval_shading_normal(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv,
-    const vec3f& outgoing) {
+    const instance_data& instance, int element, vec2f uv, vec3f outgoing) {
   auto& shape    = scene.shapes[instance.shape];
   auto& material = scene.materials[instance.material];
   if (!shape.triangles.empty() || !shape.quads.empty()) {
@@ -506,7 +481,7 @@ vec3f eval_shading_normal(const scene_data& scene,
 
 // Eval color
 vec4f eval_color(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv) {
+    int element, vec2f uv) {
   auto& shape = scene.shapes[instance.shape];
   if (shape.colors.empty()) return {1, 1, 1, 1};
   if (!shape.triangles.empty()) {
@@ -529,19 +504,17 @@ vec4f eval_color(const scene_data& scene, const instance_data& instance,
 
 // Evaluate material
 material_point eval_material(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv) {
+    const instance_data& instance, int element, vec2f uv) {
   auto& material = scene.materials[instance.material];
   auto  texcoord = eval_texcoord(scene, instance, element, uv);
 
   // evaluate textures
-  auto emission_tex = eval_texture(
-      scene, material.emission_tex, texcoord, true);
+  auto emission_tex  = eval_texture(scene, material.emission_tex, texcoord);
   auto color_shp     = eval_color(scene, instance, element, uv);
-  auto color_tex     = eval_texture(scene, material.color_tex, texcoord, true);
+  auto color_tex     = eval_texture(scene, material.color_tex, texcoord);
   auto roughness_tex = eval_texture(
-      scene, material.roughness_tex, texcoord, false);
-  auto scattering_tex = eval_texture(
-      scene, material.scattering_tex, texcoord, true);
+      scene, material.roughness_tex, texcoord, true);
+  auto scattering_tex = eval_texture(scene, material.scattering_tex, texcoord);
 
   // material point
   auto point         = material_point{};
@@ -594,7 +567,7 @@ namespace yocto {
 
 // Evaluate environment color.
 vec3f eval_environment(const scene_data& scene,
-    const environment_data& environment, const vec3f& direction) {
+    const environment_data& environment, vec3f direction) {
   auto wl       = transform_direction(inverse(environment.frame), direction);
   auto texcoord = vec2f{
       atan2(wl.z, wl.x) / (2 * pif), acos(clamp(wl.y, -1.0f, 1.0f)) / pif};
@@ -604,7 +577,7 @@ vec3f eval_environment(const scene_data& scene,
 }
 
 // Evaluate all environment color.
-vec3f eval_environment(const scene_data& scene, const vec3f& direction) {
+vec3f eval_environment(const scene_data& scene, vec3f direction) {
   auto emission = vec3f{0, 0, 0};
   for (auto& environment : scene.environments) {
     emission += eval_environment(scene, environment, direction);
@@ -645,7 +618,7 @@ void add_camera(scene_data& scene) {
 void add_sky(scene_data& scene, float sun_angle) {
   scene.texture_names.emplace_back("sky");
   auto& texture = scene.textures.emplace_back();
-  texture       = image_to_texture(make_sunsky(1024, 512, sun_angle));
+  texture       = image_to_texture(make_sunsky({1024, 512}, sun_angle), true);
   scene.environment_names.emplace_back("sky");
   auto& environment        = scene.environments.emplace_back();
   environment.emission     = {1, 1, 1};
@@ -729,6 +702,159 @@ bbox3f compute_bounds(const scene_data& scene) {
   return bbox;
 }
 
+// Scene creation helpers
+scene_data make_scene() { return scene_data{}; }
+
+// Scene creation helpers
+int add_camera(
+    scene_data& scene, const string& name, const camera_data& camera) {
+  scene.camera_names.push_back(name);
+  scene.cameras.push_back(camera);
+  return (int)scene.cameras.size() - 1;
+}
+int add_texture(
+    scene_data& scene, const string& name, const texture_data& texture) {
+  scene.texture_names.push_back(name);
+  scene.textures.push_back(texture);
+  return (int)scene.textures.size() - 1;
+}
+int add_material(
+    scene_data& scene, const string& name, const material_data& material) {
+  scene.material_names.push_back(name);
+  scene.materials.push_back(material);
+  return (int)scene.materials.size() - 1;
+}
+int add_shape(scene_data& scene, const string& name, const shape_data& shape) {
+  scene.shape_names.push_back(name);
+  scene.shapes.push_back(shape);
+  return (int)scene.shapes.size() - 1;
+}
+int add_instance(
+    scene_data& scene, const string& name, const instance_data& instance) {
+  scene.instance_names.push_back(name);
+  scene.instances.push_back(instance);
+  return (int)scene.instances.size() - 1;
+}
+int add_environment(scene_data& scene, const string& name,
+    const environment_data& environment) {
+  scene.environment_names.push_back(name);
+  scene.environments.push_back(environment);
+  return (int)scene.environments.size() - 1;
+}
+
+int add_camera(scene_data& scene, const string& name, vec3f from, vec3f to,
+    float lens, float aspect, float aperture, float focus_offset) {
+  return add_camera(scene, name,
+      {.frame       = lookat_frame(from, to, {0, 1, 0}),
+          .lens     = lens,
+          .aspect   = aspect,
+          .aperture = aperture,
+          .focus    = length(from - to) + focus_offset});
+}
+
+int add_camera(scene_data& scene, const string& name, const frame3f& frame,
+    float lens, float aspect, float aperture, float focus) {
+  return add_camera(scene, name,
+      {.frame       = frame,
+          .lens     = lens,
+          .aspect   = aspect,
+          .aperture = aperture,
+          .focus    = focus});
+}
+
+// Scene creation helpers
+int add_material(scene_data& scene, const string& name, vec3f emission,
+    material_type type, vec3f color, float roughness, int color_tex,
+    int roughness_tex, int normal_tex) {
+  return add_material(scene, name,
+      {.type             = type,
+          .emission      = emission,
+          .color         = color,
+          .roughness     = roughness,
+          .color_tex     = color_tex,
+          .roughness_tex = roughness_tex,
+          .normal_tex    = normal_tex});
+}
+
+// Scene creation helpers
+int add_material(scene_data& scene, const string& name, material_type type,
+    vec3f color, float roughness, int color_tex, int roughness_tex,
+    int normal_tex) {
+  return add_material(scene, name,
+      {.type             = type,
+          .color         = color,
+          .roughness     = roughness,
+          .color_tex     = color_tex,
+          .roughness_tex = roughness_tex,
+          .normal_tex    = normal_tex});
+}
+
+// Scene creation helpers
+int add_material(scene_data& scene, const string& name, material_type type,
+    vec3f color, float roughness, vec3f scattering, float scanisotropy,
+    float trdepth, int color_tex, int roughness_tex, int scattering_tex,
+    int normal_tex) {
+  return add_material(scene, name,
+      {.type              = type,
+          .color          = color,
+          .roughness      = roughness,
+          .scattering     = scattering,
+          .scanisotropy   = scanisotropy,
+          .trdepth        = trdepth,
+          .color_tex      = color_tex,
+          .roughness_tex  = roughness_tex,
+          .scattering_tex = scattering_tex,
+          .normal_tex     = normal_tex});
+}
+
+// Scene creation helpers
+int add_instance(scene_data& scene, const string& name, const frame3f& frame,
+    int shape, int material) {
+  return add_instance(
+      scene, name, {.frame = frame, .shape = shape, .material = material});
+}
+
+// Scene creation helpers
+int add_instance(scene_data& scene, const string& name, const frame3f& frame,
+    const shape_data& shape, const material_data& material) {
+  return add_instance(scene, name,
+      {.frame       = frame,
+          .shape    = add_shape(scene, name, shape),
+          .material = add_material(scene, name, material)});
+}
+
+// Scene creation helpers
+int add_environment(scene_data& scene, const string& name, const frame3f& frame,
+    vec3f emission, int emission_tex) {
+  return add_environment(scene, name,
+      {.frame = frame, .emission = emission, .emission_tex = emission_tex});
+  return (int)scene.environments.size() - 1;
+}
+
+// Scene creation helpers
+int add_texture(scene_data& scene, const string& name,
+    const image<vec4f>& texture, bool linear) {
+  if (texture.empty()) return invalidid;
+  if (linear) {
+    scene.textures.push_back({.pixelsf = texture});
+  } else {
+    scene.textures.push_back({.pixelsb = float_to_byte(texture)});
+  }
+  return (int)scene.textures.size() - 1;
+}
+
+// Scene creation helpers
+int add_texture(scene_data& scene, const string& name,
+    const image<vec4b>& texture, bool linear) {
+  if (texture.empty()) return invalidid;
+  if (linear) {
+    scene.textures.push_back({.pixelsf = srgbb_to_rgb(texture)});
+  } else {
+    scene.textures.push_back({.pixelsb = texture});
+  }
+  return (int)scene.textures.size() - 1;
+}
+
 }  // namespace yocto
 
 // -----------------------------------------------------------------------------
@@ -799,10 +925,9 @@ void tesselate_subdiv(
     }
   }
 
-  shape = {};
-  split_facevarying(shape.quads, shape.positions, shape.normals,
-      shape.texcoords, subdiv.quadspos, subdiv.quadsnorm, subdiv.quadstexcoord,
-      subdiv.positions, subdiv.normals, subdiv.texcoords);
+  shape = fvshape_to_shape(
+      {subdiv.quadspos, subdiv.quadsnorm, subdiv.quadstexcoord,
+          subdiv.positions, subdiv.normals, subdiv.texcoords});
 }
 
 void tesselate_subdivs(scene_data& scene) {
@@ -810,154 +935,6 @@ void tesselate_subdivs(scene_data& scene) {
   for (auto& subdiv : scene.subdivs) {
     tesselate_subdiv(scene.shapes[subdiv.shape], subdiv, scene);
   }
-}
-
-}  // namespace yocto
-
-// -----------------------------------------------------------------------------
-// SCENE STATS AND VALIDATION
-// -----------------------------------------------------------------------------
-namespace yocto {
-
-size_t compute_memory(const scene_data& scene) {
-  auto vector_memory = [](auto& values) -> size_t {
-    if (values.empty()) return 0;
-    return values.size() * sizeof(values[0]);
-  };
-
-  auto memory = (size_t)0;
-  memory += vector_memory(scene.cameras);
-  memory += vector_memory(scene.instances);
-  memory += vector_memory(scene.materials);
-  memory += vector_memory(scene.shapes);
-  memory += vector_memory(scene.textures);
-  memory += vector_memory(scene.environments);
-  memory += vector_memory(scene.camera_names);
-  memory += vector_memory(scene.instance_names);
-  memory += vector_memory(scene.material_names);
-  memory += vector_memory(scene.shape_names);
-  memory += vector_memory(scene.texture_names);
-  memory += vector_memory(scene.environment_names);
-  for (auto& shape : scene.shapes) {
-    memory += vector_memory(shape.points);
-    memory += vector_memory(shape.lines);
-    memory += vector_memory(shape.triangles);
-    memory += vector_memory(shape.quads);
-    memory += vector_memory(shape.positions);
-    memory += vector_memory(shape.normals);
-    memory += vector_memory(shape.texcoords);
-    memory += vector_memory(shape.colors);
-    memory += vector_memory(shape.triangles);
-  }
-  for (auto& subdiv : scene.subdivs) {
-    memory += vector_memory(subdiv.quadspos);
-    memory += vector_memory(subdiv.quadsnorm);
-    memory += vector_memory(subdiv.quadstexcoord);
-    memory += vector_memory(subdiv.positions);
-    memory += vector_memory(subdiv.normals);
-    memory += vector_memory(subdiv.texcoords);
-  }
-  for (auto& texture : scene.textures) {
-    memory += vector_memory(texture.pixelsb);
-    memory += vector_memory(texture.pixelsf);
-  }
-  return memory;
-}
-
-vector<string> scene_stats(const scene_data& scene, bool verbose) {
-  auto accumulate = [](const auto& values, const auto& func) -> size_t {
-    auto sum = (size_t)0;
-    for (auto& value : values) sum += func(value);
-    return sum;
-  };
-  auto format = [](size_t num) {
-    auto str = string{};
-    while (num > 0) {
-      str = std::to_string(num % 1000) + (str.empty() ? "" : ",") + str;
-      num /= 1000;
-    }
-    if (str.empty()) str = "0";
-    while (str.size() < 20) str = " " + str;
-    return str;
-  };
-  auto format3 = [](auto num) {
-    auto str = std::to_string(num.x) + " " + std::to_string(num.y) + " " +
-               std::to_string(num.z);
-    while (str.size() < 48) str = " " + str;
-    return str;
-  };
-
-  auto bbox = compute_bounds(scene);
-
-  auto stats = vector<string>{};
-  stats.push_back("cameras:      " + format(scene.cameras.size()));
-  stats.push_back("instances:    " + format(scene.instances.size()));
-  stats.push_back("materials:    " + format(scene.materials.size()));
-  stats.push_back("shapes:       " + format(scene.shapes.size()));
-  stats.push_back("subdivs:      " + format(scene.subdivs.size()));
-  stats.push_back("environments: " + format(scene.environments.size()));
-  stats.push_back("textures:     " + format(scene.textures.size()));
-  stats.push_back("memory:       " + format(compute_memory(scene)));
-  stats.push_back(
-      "points:       " + format(accumulate(scene.shapes,
-                             [](auto& shape) { return shape.points.size(); })));
-  stats.push_back(
-      "lines:        " + format(accumulate(scene.shapes,
-                             [](auto& shape) { return shape.lines.size(); })));
-  stats.push_back("triangles:    " +
-                  format(accumulate(scene.shapes,
-                      [](auto& shape) { return shape.triangles.size(); })));
-  stats.push_back(
-      "quads:        " + format(accumulate(scene.shapes,
-                             [](auto& shape) { return shape.quads.size(); })));
-  stats.push_back("fvquads:      " +
-                  format(accumulate(scene.subdivs,
-                      [](auto& subdiv) { return subdiv.quadspos.size(); })));
-  stats.push_back("texels4b:     " +
-                  format(accumulate(scene.textures,
-                      [](auto& texture) { return texture.pixelsb.size(); })));
-  stats.push_back("texels4f:     " +
-                  format(accumulate(scene.textures,
-                      [](auto& texture) { return texture.pixelsf.size(); })));
-  stats.push_back("center:       " + format3(center(bbox)));
-  stats.push_back("size:         " + format3(size(bbox)));
-
-  return stats;
-}
-
-// Checks for validity of the scene.
-vector<string> scene_validation(const scene_data& scene, bool notextures) {
-  auto errs        = vector<string>();
-  auto check_names = [&errs](const vector<string>& names, const string& base) {
-    auto used = unordered_map<string, int>();
-    used.reserve(names.size());
-    for (auto& name : names) used[name] += 1;
-    for (auto& [name, used] : used) {
-      if (name.empty()) {
-        errs.push_back("empty " + base + " name");
-      } else if (used > 1) {
-        errs.push_back("duplicated " + base + " name " + name);
-      }
-    }
-  };
-  auto check_empty_textures = [&errs](const scene_data& scene) {
-    for (auto idx : range(scene.textures.size())) {
-      auto& texture = scene.textures[idx];
-      if (texture.pixelsf.empty() && texture.pixelsb.empty()) {
-        errs.push_back("empty texture " + scene.texture_names[idx]);
-      }
-    }
-  };
-
-  check_names(scene.camera_names, "camera");
-  check_names(scene.shape_names, "shape");
-  check_names(scene.material_names, "material");
-  check_names(scene.instance_names, "instance");
-  check_names(scene.texture_names, "texture");
-  check_names(scene.environment_names, "environment");
-  if (!notextures) check_empty_textures(scene);
-
-  return errs;
 }
 
 }  // namespace yocto
@@ -1072,68 +1049,6 @@ scene_data make_cornellbox() {
   light_instance.material = (int)scene.materials.size() - 1;
 
   return scene;
-}
-
-}  // namespace yocto
-
-// -----------------------------------------------------------------------------
-// ANIMATION UTILITIES
-// -----------------------------------------------------------------------------
-namespace yocto {
-
-// Find the first keyframe value that is greater than the argument.
-inline int keyframe_index(const vector<float>& times, const float& time) {
-  for (auto i : range(times.size()))
-    if (times[i] > time) return (int)i;
-  return (int)times.size();
-}
-
-// Evaluates a keyframed value using step interpolation.
-template <typename T>
-inline T keyframe_step(
-    const vector<float>& times, const vector<T>& vals, float time) {
-  if (time <= times.front()) return vals.front();
-  if (time >= times.back()) return vals.back();
-  time     = clamp(time, times.front(), times.back() - 0.001f);
-  auto idx = keyframe_index(times, time);
-  return vals.at(idx - 1);
-}
-
-// Evaluates a keyframed value using linear interpolation.
-template <typename T>
-inline vec4f keyframe_slerp(
-    const vector<float>& times, const vector<vec4f>& vals, float time) {
-  if (time <= times.front()) return vals.front();
-  if (time >= times.back()) return vals.back();
-  time     = clamp(time, times.front(), times.back() - 0.001f);
-  auto idx = keyframe_index(times, time);
-  auto t   = (time - times.at(idx - 1)) / (times.at(idx) - times.at(idx - 1));
-  return slerp(vals.at(idx - 1), vals.at(idx), t);
-}
-
-// Evaluates a keyframed value using linear interpolation.
-template <typename T>
-inline T keyframe_linear(
-    const vector<float>& times, const vector<T>& vals, float time) {
-  if (time <= times.front()) return vals.front();
-  if (time >= times.back()) return vals.back();
-  time     = clamp(time, times.front(), times.back() - 0.001f);
-  auto idx = keyframe_index(times, time);
-  auto t   = (time - times.at(idx - 1)) / (times.at(idx) - times.at(idx - 1));
-  return vals.at(idx - 1) * (1 - t) + vals.at(idx) * t;
-}
-
-// Evaluates a keyframed value using Bezier interpolation.
-template <typename T>
-inline T keyframe_bezier(
-    const vector<float>& times, const vector<T>& vals, float time) {
-  if (time <= times.front()) return vals.front();
-  if (time >= times.back()) return vals.back();
-  time     = clamp(time, times.front(), times.back() - 0.001f);
-  auto idx = keyframe_index(times, time);
-  auto t   = (time - times.at(idx - 1)) / (times.at(idx) - times.at(idx - 1));
-  return interpolate_bezier(
-      vals.at(idx - 3), vals.at(idx - 2), vals.at(idx - 1), vals.at(idx), t);
 }
 
 }  // namespace yocto

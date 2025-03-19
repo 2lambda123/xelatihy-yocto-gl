@@ -39,12 +39,12 @@
 // INCLUDES
 // -----------------------------------------------------------------------------
 
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "yocto_scene.h"
-#include "yocto_trace.h"
 
 // -----------------------------------------------------------------------------
 // USING DIRECTIVES
@@ -75,24 +75,21 @@ struct io_error : std::runtime_error {
 namespace yocto {
 
 // Check if an image is HDR or LDR based on filename.
-bool is_hdr_filename(const string& filename);
-bool is_ldr_filename(const string& filename);
+bool is_linear_filename(const string& filename);
+bool is_srgb_filename(const string& filename);
 
 // Loads/saves a 4 channels float/byte image in linear/srgb color space.
-bool load_image(const string& filename, image_data& img, string& error);
-bool save_image(const string& filename, const image_data& img, string& error);
+image<vec4f> load_image(const string& filename);
+void         save_image(const string& filename, const image<vec4f>& image);
 
-// Loads/saves a 4 channels float/byte image in linear/srgb color space.
-image_data load_image(const string& filename);
-void       load_image(const string& filename, image_data& image);
-void       save_image(const string& filename, const image_data& image);
-
-// Make presets. Supported mostly in IO.
-image_data make_image_preset(const string& type);
+// Loads/saves a byte image.
+image<vec4b> load_imageb(const string& filename);
+void         save_imageb(const string& filename, const image<vec4b>& image);
 
 // Make presets. Supported mostly in IO.
-bool make_image_preset(
-    const string& filename, image_data& image, string& error);
+bool         is_linear_preset(const string& type_);
+bool         is_srgb_preset(const string& type_);
+image<vec4f> make_image_preset(const string& type);
 
 }  // namespace yocto
 
@@ -102,13 +99,7 @@ bool make_image_preset(
 namespace yocto {
 
 // Load/save a texture in the supported formats.
-bool load_texture(const string& filename, texture_data& texture, string& error);
-bool save_texture(
-    const string& filename, const texture_data& texture, string& error);
-
-// Load/save a texture in the supported formats.
 texture_data load_texture(const string& filename);
-void         load_texture(const string& filename, texture_data& texture);
 void         save_texture(const string& filename, const texture_data& texture);
 
 // Make presets. Supported mostly in IO.
@@ -126,39 +117,18 @@ bool make_texture_preset(
 namespace yocto {
 
 // Load/save a shape
-bool load_shape(const string& filename, shape_data& shape, string& error,
-    bool flip_texcoords = true);
-bool save_shape(const string& filename, const shape_data& shape, string& error,
-    bool flip_texcoords = true, bool ascii = false);
-
-// Load/save a shape
 shape_data load_shape(const string& filename, bool flip_texcoords = true);
-void       load_shape(
-          const string& filename, shape_data& shape, bool flip_texcoords = true);
-void save_shape(const string& filename, const shape_data& shape,
-    bool flip_texcoords = true, bool ascii = false);
-
-// Load/save a subdiv
-bool load_fvshape(const string& filename, fvshape_data& shape, string& error,
-    bool flip_texcoords = true);
-bool save_fvshape(const string& filename, const fvshape_data& shape,
-    string& error, bool flip_texcoords = true, bool ascii = false);
+void       save_shape(const string& filename, const shape_data& shape,
+          bool flip_texcoords = true, bool ascii = false);
 
 // Load/save a subdiv
 fvshape_data load_fvshape(const string& filename, bool flip_texcoords = true);
-void         load_fvshape(
-            const string& filename, fvshape_data& shape, bool flip_texcoords = true);
-void save_fvshape(const string& filename, const fvshape_data& shape,
-    bool flip_texcoords = true, bool ascii = false);
+void         save_fvshape(const string& filename, const fvshape_data& shape,
+            bool flip_texcoords = true, bool ascii = false);
 
 // Make presets. Supported mostly in IO.
 shape_data   make_shape_preset(const string& type);
 fvshape_data make_fvshape_preset(const string& type);
-
-// Make presets. Supported mostly in IO.
-bool make_shape_preset(const string& filname, shape_data& shape, string& error);
-bool make_fvshape_preset(
-    const string& filname, fvshape_data& shape, string& error);
 
 }  // namespace yocto
 
@@ -168,13 +138,7 @@ bool make_fvshape_preset(
 namespace yocto {
 
 // Load/save a subdiv in the supported formats.
-bool load_subdiv(const string& filename, subdiv_data& subdiv, string& error);
-bool save_subdiv(
-    const string& filename, const subdiv_data& subdiv, string& error);
-
-// Load/save a subdiv in the supported formats.
 subdiv_data load_subdiv(const string& filename);
-void        load_subdiv(const string& filename, subdiv_data& subdiv);
 void        save_subdiv(const string& filename, const subdiv_data& subdiv);
 
 }  // namespace yocto
@@ -185,37 +149,19 @@ void        save_subdiv(const string& filename, const subdiv_data& subdiv);
 namespace yocto {
 
 // Load/save a scene in the supported formats.
-bool load_scene(const string& filename, scene_data& scene, string& error,
-    bool noparallel = false);
-bool save_scene(const string& filename, const scene_data& scene, string& error,
-    bool noparallel = false);
-
-// Make missing scene directories
-bool make_scene_directories(
-    const string& filename, const scene_data& scene, string& error);
-
-// Add environment
-bool add_environment(scene_data& scene, const string& filename, string& error);
-
-// Load/save a scene in the supported formats.
 scene_data load_scene(const string& filename, bool noparallel = false);
-void       load_scene(
-          const string& filename, scene_data& scene, bool noparallel = false);
-void save_scene(
-    const string& filename, const scene_data& scene, bool noparallel = false);
+void       save_scene(
+          const string& filename, const scene_data& scene, bool noparallel = false);
 
 // Add environment
-void add_environment(scene_data& scene, const string& filename);
+void add_environment(
+    scene_data& scene, const string& name, const string& filename);
 
 // Make missing scene directories
 void make_scene_directories(const string& filename, const scene_data& scene);
 
 // Scene presets used for testing.
 scene_data make_scene_preset(const string& type);
-
-// Scene presets used for testing.
-bool make_scene_preset(
-    const string& filename, scene_data& scene, string& error);
 
 }  // namespace yocto
 
@@ -228,60 +174,12 @@ namespace yocto {
 using byte = unsigned char;
 
 // Load/save a text file
-bool load_text(const string& filename, string& str, string& error);
-bool save_text(const string& filename, const string& str, string& error);
-
-// Load/save a binary file
-bool load_binary(const string& filename, vector<byte>& data, string& error);
-bool save_binary(
-    const string& filename, const vector<byte>& data, string& error);
-
-// Load/save a text file
 string load_text(const string& filename);
-void   load_text(const string& filename, string& str);
 void   save_text(const string& filename, const string& str);
 
 // Load/save a binary file
 vector<byte> load_binary(const string& filename);
-void         load_binary(const string& filename, vector<byte>& data);
 void         save_binary(const string& filename, const vector<byte>& data);
-
-}  // namespace yocto
-
-// -----------------------------------------------------------------------------
-// PARAMETER IO
-// -----------------------------------------------------------------------------
-namespace yocto {
-
-// Load/Save/Update trace params
-trace_params load_trace_params(const string& filename);
-void         load_trace_params(const string& filename, trace_params& params);
-void         update_trace_params(const string& filename, trace_params& params);
-void save_trace_params(const string& filename, const trace_params& params);
-
-// Load/Save/Update color grade params
-colorgrade_params load_colorgrade_params(const string& filename);
-void load_colorgrade_params(const string& filename, colorgrade_params& params);
-void update_colorgrade_params(
-    const string& filename, colorgrade_params& params);
-void save_colorgrade_params(
-    const string& filename, const colorgrade_params& params);
-
-// Load/Save/Update trace params
-bool load_trace_params(
-    const string& filename, trace_params& params, string& error);
-bool update_trace_params(
-    const string& filename, trace_params& params, string& error);
-bool save_trace_params(
-    const string& filename, const trace_params& params, string& error);
-
-// Load/Save/Update color grade params
-bool load_colorgrade_params(
-    const string& filename, colorgrade_params& params, string& error);
-bool update_colorgrade_params(
-    const string& filename, colorgrade_params& params, string& error);
-bool save_colorgrade_params(
-    const string& filename, const colorgrade_params& params, string& error);
 
 }  // namespace yocto
 
@@ -310,34 +208,6 @@ string replace_extension(const string& path, const string& extension);
 
 // Create a directory and all missing parent directories if needed
 void make_directory(const string& path);
-bool make_directory(const string& path, string& error);
-
-}  // namespace yocto
-
-// -----------------------------------------------------------------------------
-// FILE WATCHER
-// -----------------------------------------------------------------------------
-namespace yocto {
-
-// File watcher
-struct watch_context {
-  std::atomic<int>  version   = 0;
-  std::future<void> worker    = {};
-  vector<string>    filenames = {};
-  vector<int64_t>   filetimes = {};
-  int64_t           delay     = 500;
-  std::atomic<bool> stop      = false;
-};
-
-// Initialize file watcher
-watch_context make_watch_context(
-    const vector<string>& filenames, int delay = 500);
-// Start file watcher
-void watch_start(watch_context& context);
-// Stop file watcher
-void watch_stop(watch_context& context);
-// Get file version
-int get_version(const watch_context& context);
 
 }  // namespace yocto
 

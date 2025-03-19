@@ -42,21 +42,18 @@ void run(const vector<string>& args) {
   // parameters
   auto scenename   = "scene.json"s;
   auto outname     = "out.png"s;
-  auto paramsname  = ""s;
   auto interactive = false;
   auto edit        = false;
   auto camname     = ""s;
   bool addsky      = false;
   auto envname     = ""s;
   auto savebatch   = false;
-  auto dumpname    = ""s;
   auto params      = trace_params{};
 
   // parse command line
   auto cli = make_cli("ytrace", "render with raytracing");
   add_option(cli, "scene", scenename, "scene filename");
   add_option(cli, "output", outname, "output filename");
-  add_option(cli, "params", paramsname, "params filename");
   add_option(cli, "interactive", interactive, "run interactively");
   add_option(cli, "camera", camname, "camera name");
   add_option(cli, "addsky", addsky, "add sky");
@@ -78,21 +75,8 @@ void run(const vector<string>& args) {
   add_option(cli, "embreebvh", params.embreebvh, "use Embree bvh");
   add_option(cli, "highqualitybvh", params.highqualitybvh, "high quality bvh");
   add_option(cli, "noparallel", params.noparallel, "disable threading");
-  add_option(cli, "dumpparams", dumpname, "dump params filename");
   add_option(cli, "edit", edit, "edit interactively");
   parse_cli(cli, args);
-
-  // load config
-  if (!paramsname.empty()) {
-    update_trace_params(paramsname, params);
-    print_info("loading params {}", paramsname);
-  }
-
-  // dump config
-  if (!dumpname.empty()) {
-    save_trace_params(dumpname, params);
-    print_info("saving params {}", dumpname);
-  }
 
   // start rendering
   print_info("rendering {}", scenename);
@@ -108,7 +92,7 @@ void run(const vector<string>& args) {
 
   // add environment
   if (!envname.empty()) {
-    add_environment(scene, envname);
+    add_environment(scene, "environment", envname);
   }
 
   // camera
@@ -145,18 +129,19 @@ void run(const vector<string>& args) {
       print_info("render sample {}/{}: {}", state.samples, params.samples,
           elapsed_formatted(sample_timer));
       if (savebatch && state.samples % params.batch == 0) {
-        auto image     = get_image(state);
+        auto render    = get_image(state);
         auto batchname = replace_extension(outname,
             "-" + std::to_string(state.samples) + path_extension(outname));
-        save_image(batchname, image);
+        save_image(batchname, render);
       }
     }
     print_info("render image: {}", elapsed_formatted(timer));
 
     // save image
-    timer      = simple_timer{};
-    auto image = get_image(state);
-    save_image(outname, image);
+    timer       = simple_timer{};
+    auto render = get_image(state);
+    save_image(
+        outname, is_srgb_filename(outname) ? rgb_to_srgb(render) : render);
     print_info("save image: {}", elapsed_formatted(timer));
   } else {
 #ifdef YOCTO_OPENGL
@@ -164,7 +149,7 @@ void run(const vector<string>& args) {
     auto context = make_trace_context(params);
 
     // init image
-    auto image = make_image(state.width, state.height, true);
+    auto render = image<vec4f>{state.render.size()};
 
     // opengl image
     auto glimage     = glimage_state{};
@@ -190,14 +175,14 @@ void run(const vector<string>& args) {
       // make sure we can start
       trace_cancel(context);
       state = make_trace_state(scene, params);
-      if (image.width != state.width || image.height != state.height)
-        image = make_image(state.width, state.height, true);
+      if (render.size() != state.render.size())
+        render = image<vec4f>{state.render.size()};
 
       // render preview
-      trace_preview(image, context, state, scene, bvh, lights, params);
+      trace_preview(render, context, state, scene, bvh, lights, params);
 
       // update image
-      set_image(glimage, image);
+      set_image(glimage, render);
 
       // start
       trace_start(context, state, scene, bvh, lights, params);
@@ -209,8 +194,8 @@ void run(const vector<string>& args) {
     // render update
     auto render_update = [&]() {
       if (context.done) {
-        get_image(image, state);
-        set_image(glimage, image);
+        get_image(render, state);
+        set_image(glimage, render);
         trace_start(context, state, scene, bvh, lights, params);
       }
     };
@@ -227,7 +212,7 @@ void run(const vector<string>& args) {
     callbacks.clear = [&](const gui_input& input) { clear_image(glimage); };
     callbacks.draw  = [&](const gui_input& input) {
       render_update();
-      update_image_params(input, image, glparams);
+      update_image_params(input, render, glparams);
       draw_image(glimage, glparams);
     };
     callbacks.widgets = [&](const gui_input& input) {
@@ -238,7 +223,7 @@ void run(const vector<string>& args) {
         render_restart();
       }
       draw_tonemap_widgets(input, glparams.exposure, glparams.filmic);
-      draw_image_widgets(input, image, glparams);
+      draw_image_widgets(input, render, glparams);
       if (edit) {
         if (draw_scene_widgets(scene, selection, render_cancel)) {
           render_restart();

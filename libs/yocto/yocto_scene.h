@@ -45,6 +45,7 @@
 #include "yocto_geometry.h"
 #include "yocto_image.h"
 #include "yocto_math.h"
+#include "yocto_modeling.h"
 #include "yocto_shape.h"
 
 // -----------------------------------------------------------------------------
@@ -81,7 +82,7 @@ inline const int invalidid = -1;
 // To compute good apertures, one can use the F-stop number from photography
 // and set the aperture to focal length over f-stop.
 struct camera_data {
-  frame3f frame        = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+  frame3f frame        = identity3x4f;
   bool    orthographic = false;
   float   lens         = 0.050f;
   float   film         = 0.036f;
@@ -93,13 +94,10 @@ struct camera_data {
 // Texture data as array of float or byte pixels. Textures can be stored in
 // linear or non linear color space.
 struct texture_data {
-  int           width   = 0;
-  int           height  = 0;
-  bool          linear  = false;
-  bool          nearest = false;
-  bool          clamp   = false;
-  vector<vec4f> pixelsf = {};
-  vector<vec4b> pixelsb = {};
+  image<vec4f> pixelsf = {};
+  image<vec4b> pixelsb = {};
+  bool         nearest = false;
+  bool         clamp   = false;
 };
 
 // Material type
@@ -143,7 +141,7 @@ struct material_data {
 // Instance.
 struct instance_data {
   // instance data
-  frame3f frame    = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+  frame3f frame    = identity3x4f;
   int     shape    = invalidid;
   int     material = invalidid;
 };
@@ -151,7 +149,7 @@ struct instance_data {
 // Environment map.
 struct environment_data {
   // environment data
-  frame3f frame        = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {0, 0, 0}};
+  frame3f frame        = identity3x4f;
   vec3f   emission     = {0, 0, 0};
   int     emission_tex = invalidid;
 };
@@ -182,7 +180,7 @@ struct subdiv_data {
   int shape = invalidid;
 };
 
-// Scene comprised an array of objects whose memory is owened by the scene.
+// Scene comprised an array of objects whose memory is owned by the scene.
 // All members are optional,Scene objects (camera, instances, environments)
 // have transforms defined internally. A scene can optionally contain a
 // node hierarchy where each node might point to a camera, instance or
@@ -212,6 +210,18 @@ struct scene_data {
   string copyright = "";
 };
 
+// Scene lights used during rendering.
+struct light_data {
+  int           instance     = invalidid;
+  int           environment  = invalidid;
+  vector<float> elements_cdf = {};
+};
+
+// Scene lights
+struct lights_data {
+  vector<light_data> lights = {};
+};
+
 }  // namespace yocto
 
 // -----------------------------------------------------------------------------
@@ -219,9 +229,11 @@ struct scene_data {
 // -----------------------------------------------------------------------------
 namespace yocto {
 
+// Computes the image resolution from the camera.
+vec2i camera_resolution(const camera_data& camera, int resolution);
+
 // Generates a ray from a camera.
-ray3f eval_camera(
-    const camera_data& camera, const vec2f& image_uv, const vec2f& lens_uv);
+ray3f eval_camera(const camera_data& camera, vec2f image_uv, vec2f lens_uv);
 
 }  // namespace yocto
 
@@ -232,20 +244,16 @@ namespace yocto {
 
 // Evaluates a texture
 vec4f eval_texture(
-    const texture_data& texture, const vec2f& uv, bool as_linear = false);
-vec4f eval_texture(const scene_data& scene, int texture, const vec2f& uv,
-    bool as_linear = false);
-vec4f eval_texture(const texture_data& texture, const vec2f& uv, bool as_linear,
-    bool no_interpolation, bool clamp_to_edge);
-vec4f eval_texture(const scene_data& scene, int texture, const vec2f& uv,
-    bool as_linear, bool no_interpolation, bool clamp_to_edge);
+    const texture_data& texture, vec2f uv, bool ldr_as_linear = false);
+vec4f eval_texture(
+    const scene_data& scene, int texture, vec2f uv, bool ldr_as_linear = false);
 
 // pixel access
 vec4f lookup_texture(
-    const texture_data& texture, int i, int j, bool as_linear = false);
+    const texture_data& texture, vec2i ij, bool ldr_as_linear = false);
 
 // conversion from image
-texture_data image_to_texture(const image_data& image);
+texture_data image_to_texture(const image<vec4f>& image, bool linear);
 
 }  // namespace yocto
 
@@ -271,8 +279,8 @@ struct material_point {
 
 // Eval material to obtain emission, brdf and opacity.
 material_point eval_material(const scene_data& scene,
-    const material_data& material, const vec2f& texcoord,
-    const vec4f& shape_color = {1, 1, 1, 1});
+    const material_data& material, vec2f texcoord,
+    vec4f shape_color = {1, 1, 1, 1});
 
 // check if a material is a delta
 bool is_delta(const material_data& material);
@@ -292,29 +300,27 @@ namespace yocto {
 
 // Evaluate instance properties
 vec3f eval_position(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv);
+    int element, vec2f uv);
 vec3f eval_element_normal(
     const scene_data& scene, const instance_data& instance, int element);
 vec3f eval_normal(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv);
+    int element, vec2f uv);
 vec2f eval_texcoord(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv);
+    int element, vec2f uv);
 pair<vec3f, vec3f> eval_element_tangents(
     const scene_data& scene, const instance_data& instance, int element);
 vec3f eval_normalmap(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv);
+    int element, vec2f uv);
 vec3f eval_shading_position(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv,
-    const vec3f& outgoing);
+    const instance_data& instance, int element, vec2f uv, vec3f outgoing);
 vec3f eval_shading_normal(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv,
-    const vec3f& outgoing);
+    const instance_data& instance, int element, vec2f uv, vec3f outgoing);
 vec4f eval_color(const scene_data& scene, const instance_data& instance,
-    int element, const vec2f& uv);
+    int element, vec2f uv);
 
 // Eval material to obtain emission, brdf and opacity.
 material_point eval_material(const scene_data& scene,
-    const instance_data& instance, int element, const vec2f& uv);
+    const instance_data& instance, int element, vec2f uv);
 // check if a material has a volume
 bool is_volumetric(const scene_data& scene, const instance_data& instance);
 
@@ -327,8 +333,8 @@ namespace yocto {
 
 // Environment
 vec3f eval_environment(const scene_data& scene,
-    const environment_data& environment, const vec3f& direction);
-vec3f eval_environment(const scene_data& scene, const vec3f& direction);
+    const environment_data& environment, vec3f direction);
+vec3f eval_environment(const scene_data& scene, vec3f direction);
 
 }  // namespace yocto
 
@@ -353,11 +359,52 @@ bool has_lights(const scene_data& scene);
 // create a scene from a shape
 scene_data make_shape_scene(const shape_data& shape, bool add_sky = false);
 
-// Return scene statistics as list of strings.
-vector<string> scene_stats(const scene_data& scene, bool verbose = false);
-// Return validation errors as list of strings.
-vector<string> scene_validation(
-    const scene_data& scene, bool notextures = false);
+// Initialize scene
+scene_data make_scene();
+
+// Scene creation helpers
+int add_camera(
+    scene_data& scene, const string& name, const camera_data& camera);
+int add_texture(
+    scene_data& scene, const string& name, const texture_data& texture);
+int add_material(
+    scene_data& scene, const string& name, const material_data& material);
+int add_shape(
+    scene_data& scene, const string& name, const shape_data& material);
+int add_instance(
+    scene_data& scene, const string& name, const instance_data& instance);
+int add_environment(
+    scene_data& scene, const string& name, const environment_data& environment);
+
+// Scene creation helpers
+int add_camera(scene_data& scene, const string& name, vec3f from, vec3f to,
+    float lens = 0.1f, float aspect = 16.0f / 9.0f, float aperture = 0,
+    float focus_offset = 0);
+int add_camera(scene_data& scene, const string& name, const frame3f& frame,
+    float lens = 0.1f, float aspect = 16.0f / 9.0f, float aperture = 0,
+    float focus = 1);
+int add_material(scene_data& scene, const string& name, vec3f emission,
+    material_type type, vec3f color, float roughness = 0,
+    int color_tex = invalidid, int roughness_tex = invalidid,
+    int normal_tex = invalidid);
+int add_material(scene_data& scene, const string& name, material_type type,
+    vec3f color, float roughness = 0, int color_tex = invalidid,
+    int roughness_tex = invalidid, int normal_tex = invalidid);
+int add_material(scene_data& scene, const string& name, material_type type,
+    vec3f color, float roughness, vec3f scattering, float scanisotropy = 0,
+    float trdepth = 0.01f, int color_tex = invalidid,
+    int roughness_tex = invalidid, int scattering_tex = invalidid,
+    int normal_tex = invalidid);
+int add_instance(scene_data& scene, const string& name, const frame3f& frame,
+    int shape, int material);
+int add_instance(scene_data& scene, const string& name, const frame3f& frame,
+    const shape_data& shape, const material_data& material);
+int add_environment(scene_data& scene, const string& name, const frame3f& frame,
+    vec3f emission, int emission_tex = invalidid);
+int add_texture(scene_data& scene, const string& name,
+    const image<vec4f>& texture, bool linear = true);
+int add_texture(scene_data& scene, const string& name,
+    const image<vec4b>& texture, bool linear = false);
 
 }  // namespace yocto
 
@@ -378,31 +425,6 @@ namespace yocto {
 
 // Make Cornell Box scene
 scene_data make_cornellbox();
-
-}  // namespace yocto
-
-// -----------------------------------------------------------------------------
-// BACKWARDS COMPATIBILITY
-// -----------------------------------------------------------------------------
-namespace yocto {
-
-using sceneio_scene [[deprecated]]       = scene_data;
-using scene_model [[deprecated]]         = scene_data;
-using sceneio_camera [[deprecated]]      = camera_data;
-using scene_camera [[deprecated]]        = camera_data;
-using sceneio_texture [[deprecated]]     = texture_data;
-using scene_texture [[deprecated]]       = texture_data;
-using sceneio_material [[deprecated]]    = material_data;
-using scene_material_type [[deprecated]] = material_type;
-using sceneio_material [[deprecated]]    = material_data;
-using sceneio_shape [[deprecated]]       = shape_data;
-using scene_shape [[deprecated]]         = shape_data;
-using scene_fvshape [[deprecated]]       = fvshape_data;
-using sceneio_instance [[deprecated]]    = instance_data;
-using scene_instance [[deprecated]]      = instance_data;
-using sceneio_environment [[deprecated]] = environment_data;
-using scene_environment [[deprecated]]   = environment_data;
-using scene_subdiv [[deprecated]]        = subdiv_data;
 
 }  // namespace yocto
 
